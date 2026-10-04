@@ -1,0 +1,216 @@
+=== P2. % de edificios a más de 500 m de un paradero (GTFS vs OSM) ===
+DROP TABLE IF EXISTS resultados.q2;
+DROP TABLE
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE TABLE resultados.q2 AS
+WITH ed AS (                      -- edificio -> comuna (punto en polígono, 1 pieza por edificio)
+  SELECT e.id, e.punto, s.comuna_id
+    FROM edificios e
+    CROSS JOIN LATERAL (
+          SELECT sub.comuna_id FROM comunas_zona_sub sub
+           WHERE ST_Intersects(sub.geom, e.punto) LIMIT 1) s
+),
+lejos_gtfs AS (                   -- anti-join 1: ningún paradero GTFS a <= 500 m
+  SELECT ed.comuna_id, count(*) AS n
+    FROM ed
+   WHERE NOT EXISTS (SELECT 1 FROM paraderos_gtfs p
+                      WHERE p.modo = 'bus' AND ST_DWithin(p.geom, ed.punto, 500))
+   GROUP BY ed.comuna_id
+),
+lejos_osm AS (                    -- anti-join 2: ningún bus_stop OSM a <= 500 m
+  SELECT ed.comuna_id, count(*) AS n
+    FROM ed
+   WHERE NOT EXISTS (SELECT 1 FROM paraderos_osm p
+                      WHERE ST_DWithin(p.geom, ed.punto, 500))
+   GROUP BY ed.comuna_id
+),
+total AS (
+  SELECT comuna_id, count(*) AS n FROM ed GROUP BY comuna_id
+)
+SELECT c.id, c.nombre AS comuna,
+       t.n                                              AS edificios,
+       coalesce(g.n, 0)                                 AS lejos_gtfs,
+       coalesce(o.n, 0)                                 AS lejos_osm,
+       round(100.0 * coalesce(g.n, 0) / t.n, 1)         AS pct_lejos_gtfs,
+       round(100.0 * coalesce(o.n, 0) / t.n, 1)         AS pct_lejos_osm,
+       round(100.0 * (coalesce(o.n, 0) - coalesce(g.n, 0)) / t.n, 1) AS dif_pp_osm_menos_gtfs,
+       c.geom
+  FROM comunas_zona c
+  JOIN total t           ON t.comuna_id = c.id
+  LEFT JOIN lejos_gtfs g ON g.comuna_id = c.id
+  LEFT JOIN lejos_osm  o ON o.comuna_id = c.id;
+                                                                       QUERY PLAN                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Left Join (actual time=4214.511..4214.730 rows=30 loops=1)
+   Hash Cond: (c.id = o.comuna_id)
+   Buffers: shared hit=1124594
+   CTE ed
+     ->  Nested Loop (actual time=0.161..1141.178 rows=118821 loops=1)
+           Buffers: shared hit=263086
+           ->  Seq Scan on edificios e (actual time=0.007..16.158 rows=118821 loops=1)
+                 Buffers: shared hit=3867
+           ->  Limit (actual time=0.009..0.009 rows=1 loops=118821)
+                 Buffers: shared hit=259219
+                 ->  Index Scan using comunas_zona_sub_geom_gist on comunas_zona_sub sub (actual time=0.009..0.009 rows=1 loops=118821)
+                       Index Cond: (geom && e.punto)
+                       Filter: st_intersects(geom, e.punto)
+                       Rows Removed by Filter: 0
+                       Buffers: shared hit=259219
+   ->  Hash Left Join (actual time=2781.369..2781.547 rows=30 loops=1)
+         Hash Cond: (c.id = g.comuna_id)
+         Buffers: shared hit=698275
+         ->  Hash Join (actual time=1223.717..1223.883 rows=30 loops=1)
+               Hash Cond: (ed.comuna_id = c.id)
+               Buffers: shared hit=263114
+               ->  HashAggregate (actual time=1223.625..1223.778 rows=30 loops=1)
+                     Group Key: ed.comuna_id
+                     Batches: 1  Memory Usage: 1561kB
+                     Buffers: shared hit=263086
+                     ->  CTE Scan on ed (actual time=0.163..1190.221 rows=118821 loops=1)
+                           Buffers: shared hit=263086
+               ->  Hash (actual time=0.085..0.085 rows=30 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 101kB
+                     Buffers: shared hit=28
+                     ->  Seq Scan on comunas_zona c (actual time=0.006..0.039 rows=30 loops=1)
+                           Buffers: shared hit=28
+         ->  Hash (actual time=1557.437..1557.439 rows=15 loops=1)
+               Buckets: 65536  Batches: 1  Memory Usage: 513kB
+               Buffers: shared hit=435161
+               ->  Subquery Scan on g (actual time=1557.299..1557.425 rows=15 loops=1)
+                     Buffers: shared hit=435161
+                     ->  GroupAggregate (actual time=1557.298..1557.423 rows=15 loops=1)
+                           Group Key: ed_1.comuna_id
+                           Buffers: shared hit=435161
+                           ->  Sort (actual time=1557.290..1557.340 rows=1349 loops=1)
+                                 Sort Key: ed_1.comuna_id
+                                 Sort Method: quicksort  Memory: 49kB
+                                 Buffers: shared hit=435161
+                                 ->  Nested Loop Anti Join (actual time=4.800..1557.084 rows=1349 loops=1)
+                                       Buffers: shared hit=435161
+                                       ->  CTE Scan on ed ed_1 (actual time=0.001..11.545 rows=118821 loops=1)
+                                       ->  Index Scan using paraderos_gtfs_geom_gist on paraderos_gtfs p (actual time=0.012..0.012 rows=1 loops=118821)
+                                             Index Cond: (geom && st_expand(ed_1.punto, '500'::double precision))
+                                             Filter: ((modo = 'bus'::text) AND st_dwithin(geom, ed_1.punto, '500'::double precision))
+                                             Rows Removed by Filter: 1
+                                             Buffers: shared hit=435161
+   ->  Hash (actual time=1432.944..1432.945 rows=15 loops=1)
+         Buckets: 65536  Batches: 1  Memory Usage: 513kB
+         Buffers: shared hit=426319
+         ->  Subquery Scan on o (actual time=1432.813..1432.933 rows=15 loops=1)
+               Buffers: shared hit=426319
+               ->  GroupAggregate (actual time=1432.813..1432.931 rows=15 loops=1)
+                     Group Key: ed_2.comuna_id
+                     Buffers: shared hit=426319
+                     ->  Sort (actual time=1432.805..1432.844 rows=1159 loops=1)
+                           Sort Key: ed_2.comuna_id
+                           Sort Method: quicksort  Memory: 49kB
+                           Buffers: shared hit=426319
+                           ->  Nested Loop Anti Join (actual time=2.702..1432.611 rows=1159 loops=1)
+                                 Buffers: shared hit=426319
+                                 ->  CTE Scan on ed ed_2 (actual time=0.000..11.344 rows=118821 loops=1)
+                                 ->  Index Scan using paraderos_osm_geom_gist on paraderos_osm p_1 (actual time=0.011..0.011 rows=1 loops=118821)
+                                       Index Cond: (geom && st_expand(ed_2.punto, '500'::double precision))
+                                       Filter: st_dwithin(geom, ed_2.punto, '500'::double precision)
+                                       Rows Removed by Filter: 1
+                                       Buffers: shared hit=426319
+ Planning:
+   Buffers: shared hit=489
+ Planning Time: 13.140 ms
+ Execution Time: 4219.780 ms
+(76 rows)
+
+
+--- Resultado por comuna (ordenado por % lejos según GTFS) ---
+SELECT comuna, edificios, pct_lejos_gtfs, pct_lejos_osm, dif_pp_osm_menos_gtfs
+  FROM resultados.q2
+ ORDER BY pct_lejos_gtfs DESC, comuna;
+       comuna        | edificios | pct_lejos_gtfs | pct_lejos_osm | dif_pp_osm_menos_gtfs 
+---------------------+-----------+----------------+---------------+-----------------------
+ Lo Barnechea        |        78 |           62.8 |          62.8 |                   0.0
+ Huechuraba          |      1269 |           10.7 |          10.4 |                  -0.3
+ Quilicura           |      2291 |            7.5 |           7.5 |                   0.0
+ La Florida          |       965 |            4.7 |           4.7 |                   0.0
+ Vitacura            |      4017 |            3.9 |           3.9 |                   0.0
+ Peñalolén           |      3464 |            2.9 |           2.5 |                  -0.4
+ Las Condes          |     10841 |            2.6 |           2.5 |                  -0.1
+ La Reina            |     11806 |            1.8 |           1.3 |                  -0.5
+ Recoleta            |      3085 |            1.8 |           1.0 |                  -0.9
+ Independencia       |      1374 |            1.7 |           1.5 |                  -0.2
+ Providencia         |     12129 |            0.7 |           0.1 |                  -0.6
+ Maipú               |      9831 |            0.2 |           0.2 |                   0.0
+ Cerrillos           |      3948 |            0.1 |           0.1 |                   0.0
+ Renca               |      2856 |            0.1 |           0.1 |                   0.0
+ Cerro Navia         |       458 |            0.0 |           0.0 |                   0.0
+ Conchalí            |      1341 |            0.0 |           0.0 |                   0.0
+ Estación Central    |      2470 |            0.0 |           0.0 |                   0.0
+ La Cisterna         |       414 |            0.0 |           0.0 |                   0.0
+ La Granja           |       152 |            0.0 |           0.0 |                   0.0
+ Lo Espejo           |       217 |            0.0 |           0.0 |                   0.0
+ Lo Prado            |       915 |            0.0 |           0.0 |                   0.0
+ Macul               |      5230 |            0.0 |           0.0 |                   0.0
+ Ñuñoa               |     12783 |            0.0 |           0.0 |                   0.0
+ Pedro Aguirre Cerda |      1154 |            0.0 |           0.0 |                   0.0
+ Pudahuel            |       658 |            0.0 |           0.0 |                   0.0
+ Quinta Normal       |      1066 |            0.0 |           0.0 |                   0.0
+ San Joaquín         |      2647 |            0.0 |           0.0 |                   0.0
+ San Miguel          |      1637 |            0.0 |           0.0 |                   0.0
+ San Ramón           |        10 |            0.0 |           0.0 |                   0.0
+ Santiago            |     19715 |            0.0 |           0.0 |                   0.0
+(30 rows)
+
+
+--- Total de la zona ---
+SELECT sum(edificios) AS edificios,
+       round(100.0 * sum(lejos_gtfs) / sum(edificios), 2) AS pct_lejos_gtfs,
+       round(100.0 * sum(lejos_osm)  / sum(edificios), 2) AS pct_lejos_osm
+  FROM resultados.q2;
+ edificios | pct_lejos_gtfs | pct_lejos_osm 
+-----------+----------------+---------------
+    118821 |           1.14 |          0.98
+(1 row)
+
+
+--- ¿Cambia la conclusión? Ranking de las 5 comunas peor cubiertas según cada fuente ---
+SELECT r_gtfs.pos, r_gtfs.comuna AS peor_segun_gtfs, r_gtfs.pct_lejos_gtfs,
+       r_osm.comuna AS peor_segun_osm, r_osm.pct_lejos_osm
+  FROM (SELECT row_number() OVER (ORDER BY pct_lejos_gtfs DESC, comuna) AS pos, comuna, pct_lejos_gtfs FROM resultados.q2) r_gtfs
+  JOIN (SELECT row_number() OVER (ORDER BY pct_lejos_osm  DESC, comuna) AS pos, comuna, pct_lejos_osm  FROM resultados.q2) r_osm
+ USING (pos)
+ WHERE pos <= 5
+ ORDER BY pos;
+ pos | peor_segun_gtfs | pct_lejos_gtfs | peor_segun_osm | pct_lejos_osm 
+-----+-----------------+----------------+----------------+---------------
+   1 | Lo Barnechea    |           62.8 | Lo Barnechea   |          62.8
+   2 | Huechuraba      |           10.7 | Huechuraba     |          10.4
+   3 | Quilicura       |            7.5 | Quilicura      |           7.5
+   4 | La Florida      |            4.7 | La Florida     |           4.7
+   5 | Vitacura        |            3.9 | Vitacura       |           3.9
+(5 rows)
+
+
+--- Sin índice sólo se muestra el plan estimado (con EXPLAIN ANALYZE tardaría demasiado) ---
+BEGIN;
+BEGIN
+SET LOCAL enable_indexscan = off;
+SET
+SET LOCAL enable_bitmapscan = off;
+SET
+EXPLAIN
+SELECT count(*) FROM edificios e
+ WHERE NOT EXISTS (SELECT 1 FROM paraderos_gtfs p
+                    WHERE p.modo = 'bus' AND ST_DWithin(p.geom, e.punto, 500));
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=4077436068.52..4077436068.53 rows=1 width=8)
+   ->  Gather  (cost=4077436068.31..4077436068.52 rows=2 width=8)
+         Workers Planned: 2
+         ->  Partial Aggregate  (cost=4077435068.31..4077435068.32 rows=1 width=8)
+               ->  Nested Loop Anti Join  (cost=0.00..4077434944.55 rows=49503 width=0)
+                     Join Filter: st_dwithin(p.geom, e.punto, '500'::double precision)
+                     ->  Parallel Seq Scan on edificios e  (cost=0.00..4362.09 rows=49509 width=32)
+                     ->  Seq Scan on paraderos_gtfs p  (cost=0.00..189.15 rows=6569 width=32)
+                           Filter: (modo = 'bus'::text)
+(9 rows)
+
+COMMIT;
+COMMIT

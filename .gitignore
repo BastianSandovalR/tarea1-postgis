@@ -1,0 +1,23 @@
+# ---- Datos fuente: NO se versionan (enunciado, descuento -10) ----
+datos/*
+!datos/LEEME.md
+*.osm.pbf
+*.pbf
+osm_*.gpkg
+GTFS*.zip
+gtfs*.zip
+comunas_cl.sql
+
+# ---- Varios ----
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
+*.log
+salidas/*.gpkg-journal
+salidas/*.gpkg-wal
+salidas/*.gpkg-shm
+
+# ---- Enunciado (no es parte de la entrega) ----
+*.pdf
+!informe/*.pdf

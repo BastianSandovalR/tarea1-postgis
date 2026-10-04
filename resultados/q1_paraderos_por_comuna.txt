@@ -1,0 +1,137 @@
+=== P1. Paraderos GTFS de bus por comuna y densidad ===
+DROP TABLE IF EXISTS resultados.q1;
+DROP TABLE
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE TABLE resultados.q1 AS
+SELECT c.id,
+       c.cut,
+       c.nombre                                             AS comuna,
+       c.completa,
+       round(c.area_km2::numeric, 2)                        AS area_km2,
+       count(DISTINCT x.stop_id)                            AS paraderos,
+       round((count(DISTINCT x.stop_id) / c.area_km2)::numeric, 1) AS paraderos_km2,
+       c.geom
+  FROM comunas_zona c
+  LEFT JOIN (
+        SELECT s.comuna_id, p.stop_id
+          FROM comunas_zona_sub s
+          JOIN paraderos_gtfs p
+            ON ST_Intersects(s.geom, p.geom)
+         WHERE p.modo = 'bus'
+       ) x ON x.comuna_id = c.id
+ GROUP BY c.id;
+                                                            QUERY PLAN                                                             
+-----------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=35.238..36.984 rows=30 loops=1)
+   Group Key: c.id
+   Buffers: shared hit=7800
+   ->  Sort (actual time=35.139..35.818 rows=6569 loops=1)
+         Sort Key: c.id, p.stop_id
+         Sort Method: quicksort  Memory: 23220kB
+         Buffers: shared hit=7800
+         ->  Hash Right Join (actual time=0.417..13.727 rows=6569 loops=1)
+               Hash Cond: (s.comuna_id = c.id)
+               Buffers: shared hit=7797
+               ->  Nested Loop (actual time=0.267..12.000 rows=6569 loops=1)
+                     Buffers: shared hit=7769
+                     ->  Seq Scan on comunas_zona_sub s (actual time=0.005..0.041 rows=67 loops=1)
+                           Buffers: shared hit=14
+                     ->  Index Scan using paraderos_gtfs_geom_gist on paraderos_gtfs p (actual time=0.025..0.168 rows=98 loops=67)
+                           Index Cond: (geom && s.geom)
+                           Filter: ((modo = 'bus'::text) AND st_intersects(s.geom, geom))
+                           Rows Removed by Filter: 48
+                           Buffers: shared hit=7755
+               ->  Hash (actual time=0.139..0.140 rows=30 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 101kB
+                     Buffers: shared hit=28
+                     ->  Seq Scan on comunas_zona c (actual time=0.009..0.053 rows=30 loops=1)
+                           Buffers: shared hit=28
+ Planning:
+   Buffers: shared hit=322
+ Planning Time: 13.687 ms
+ Execution Time: 40.445 ms
+(28 rows)
+
+
+--- Resultado (ordenado por densidad) ---
+SELECT comuna, CASE WHEN completa THEN 'sí' ELSE 'no (cortada por la caja)' END AS completa,
+       area_km2, paraderos, paraderos_km2
+  FROM resultados.q1
+ ORDER BY paraderos_km2 DESC;
+       comuna        |         completa         | area_km2 | paraderos | paraderos_km2 
+---------------------+--------------------------+----------+-----------+---------------
+ San Ramón           | no (cortada por la caja) |     0.16 |         6 |          36.9
+ Lo Espejo           | no (cortada por la caja) |     4.04 |       118 |          29.2
+ Lo Prado            | sí                       |     6.54 |       191 |          29.2
+ Conchalí            | sí                       |    10.94 |       311 |          28.4
+ La Granja           | no (cortada por la caja) |     1.08 |        27 |          25.0
+ Santiago            | sí                       |    23.18 |       573 |          24.7
+ San Joaquín         | sí                       |     9.94 |       244 |          24.6
+ Quinta Normal       | sí                       |    11.80 |       282 |          23.9
+ Cerro Navia         | no (cortada por la caja) |     7.13 |       163 |          22.9
+ Estación Central    | sí                       |    14.37 |       310 |          21.6
+ La Cisterna         | no (cortada por la caja) |     1.72 |        37 |          21.5
+ Ñuñoa               | sí                       |    16.89 |       363 |          21.5
+ Pedro Aguirre Cerda | sí                       |     8.73 |       186 |          21.3
+ Macul               | sí                       |    12.81 |       271 |          21.2
+ Recoleta            | sí                       |    15.61 |       327 |          20.9
+ Independencia       | sí                       |     7.35 |       152 |          20.7
+ Maipú               | no (cortada por la caja) |    11.18 |       210 |          18.8
+ Pudahuel            | no (cortada por la caja) |     5.14 |        96 |          18.7
+ San Miguel          | sí                       |     9.63 |       179 |          18.6
+ Cerrillos           | no (cortada por la caja) |    15.22 |       278 |          18.3
+ La Florida          | no (cortada por la caja) |     9.08 |       165 |          18.2
+ Providencia         | sí                       |    14.44 |       242 |          16.8
+ La Reina            | no (cortada por la caja) |    17.12 |       263 |          15.4
+ Renca               | no (cortada por la caja) |    16.73 |       239 |          14.3
+ Peñalolén           | no (cortada por la caja) |    30.86 |       430 |          13.9
+ Las Condes          | no (cortada por la caja) |    30.92 |       364 |          11.8
+ Quilicura           | no (cortada por la caja) |    16.65 |       178 |          10.7
+ Huechuraba          | no (cortada por la caja) |    21.01 |       165 |           7.9
+ Vitacura            | no (cortada por la caja) |    26.35 |       194 |           7.4
+ Lo Barnechea        | no (cortada por la caja) |     2.81 |         5 |           1.8
+(30 rows)
+
+SELECT sum(paraderos) AS total_paraderos_bus_en_comunas,
+       round(sum(paraderos) / sum(area_km2), 1) AS densidad_zona
+  FROM resultados.q1;
+ total_paraderos_bus_en_comunas | densidad_zona 
+--------------------------------+---------------
+                           6569 |          17.3
+(1 row)
+
+
+--- Mismo join SIN índices (enable_indexscan/bitmapscan = off) ---
+BEGIN;
+BEGIN
+SET LOCAL enable_indexscan = off;
+SET
+SET LOCAL enable_bitmapscan = off;
+SET
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT s.comuna_id, count(DISTINCT p.stop_id)
+  FROM comunas_zona_sub s
+  JOIN paraderos_gtfs p ON ST_Intersects(s.geom, p.geom)
+ WHERE p.modo = 'bus'
+ GROUP BY s.comuna_id;
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=118.629..119.740 rows=30 loops=1)
+   Group Key: s.comuna_id
+   ->  Sort (actual time=118.587..118.888 rows=6569 loops=1)
+         Sort Key: s.comuna_id, p.stop_id
+         Sort Method: quicksort  Memory: 397kB
+         ->  Nested Loop (actual time=0.057..108.172 rows=6569 loops=1)
+               Join Filter: st_intersects(s.geom, p.geom)
+               Rows Removed by Join Filter: 433554
+               ->  Seq Scan on paraderos_gtfs p (actual time=0.005..1.571 rows=6569 loops=1)
+                     Filter: (modo = 'bus'::text)
+                     Rows Removed by Filter: 243
+               ->  Materialize (actual time=0.000..0.002 rows=67 loops=6569)
+                     ->  Seq Scan on comunas_zona_sub s (actual time=0.002..0.019 rows=67 loops=1)
+ Planning Time: 0.445 ms
+ Execution Time: 119.768 ms
+(15 rows)
+
+COMMIT;
+COMMIT

@@ -1,0 +1,158 @@
+=== P4. Km de recorrido por comuna (ST_Intersection) ===
+
+--- A) Plan contra comunas_zona (polígonos completos) ---
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+SELECT c.id, sum(ST_Length(ST_Intersection(r.geom, c.geom))) / 1000 AS km
+  FROM recorridos r
+  JOIN comunas_zona c ON ST_Intersects(r.geom, c.geom)
+ WHERE r.es_principal
+ GROUP BY c.id;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=12.997..453.569 rows=30 loops=1)
+   Group Key: c.id
+   Buffers: shared hit=25391
+   ->  Nested Loop (actual time=0.702..105.737 rows=2589 loops=1)
+         Buffers: shared hit=19175
+         ->  Index Scan using comunas_zona_pkey on comunas_zona c (actual time=0.006..0.088 rows=30 loops=1)
+               Buffers: shared hit=25
+         ->  Index Scan using recorridos_geom_gist on recorridos r (actual time=0.190..3.490 rows=86 loops=30)
+               Index Cond: (geom && c.geom)
+               Filter: (es_principal AND st_intersects(geom, c.geom))
+               Rows Removed by Filter: 132
+               Buffers: shared hit=19150
+ Planning:
+   Buffers: shared hit=254 dirtied=2
+ Planning Time: 11.485 ms
+ Execution Time: 453.658 ms
+(16 rows)
+
+
+--- B) Plan contra comunas_zona_sub (ST_Subdivide 128) ---
+DROP TABLE IF EXISTS resultados.q4;
+DROP TABLE
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE TABLE resultados.q4 AS
+WITH km AS (
+  SELECT s.comuna_id,
+         sum(ST_Length(ST_Intersection(r.geom, s.geom))) / 1000 AS km,
+         count(DISTINCT r.route_id)                             AS rutas
+    FROM recorridos r
+    JOIN comunas_zona_sub s ON ST_Intersects(r.geom, s.geom)
+   WHERE r.es_principal
+   GROUP BY s.comuna_id
+)
+SELECT c.id, c.nombre AS comuna, c.completa,
+       round(c.area_km2::numeric, 2)                  AS area_km2,
+       round(coalesce(k.km, 0)::numeric, 1)           AS km_recorrido,
+       coalesce(k.rutas, 0)                           AS rutas,
+       round((coalesce(k.km, 0) / c.area_km2)::numeric, 1) AS km_por_km2,
+       c.geom
+  FROM comunas_zona c
+  LEFT JOIN km k ON k.comuna_id = c.id;
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Merge Left Join (actual time=181.800..551.900 rows=30 loops=1)
+   Merge Cond: (c.id = s.comuna_id)
+   Buffers: shared hit=46792
+   ->  Index Scan using comunas_zona_pkey on comunas_zona c (actual time=0.003..0.098 rows=30 loops=1)
+         Buffers: shared hit=25
+   ->  GroupAggregate (actual time=181.781..551.339 rows=30 loops=1)
+         Group Key: s.comuna_id
+         Buffers: shared hit=46767
+         ->  Sort (actual time=174.302..175.061 rows=4070 loops=1)
+               Sort Key: s.comuna_id, r.route_id
+               Sort Method: quicksort  Memory: 15399kB
+               Buffers: shared hit=36594
+               ->  Nested Loop (actual time=0.123..160.117 rows=4070 loops=1)
+                     Buffers: shared hit=36591
+                     ->  Seq Scan on comunas_zona_sub s (actual time=0.003..0.074 rows=67 loops=1)
+                           Buffers: shared hit=14
+                     ->  Index Scan using recorridos_geom_gist on recorridos r (actual time=0.168..2.374 rows=61 loops=67)
+                           Index Cond: (geom && s.geom)
+                           Filter: (es_principal AND st_intersects(geom, s.geom))
+                           Rows Removed by Filter: 119
+                           Buffers: shared hit=36577
+ Planning:
+   Buffers: shared hit=69
+ Planning Time: 0.481 ms
+ Execution Time: 555.498 ms
+(25 rows)
+
+
+--- Resultado (ordenado por km de recorrido) ---
+SELECT comuna, area_km2, km_recorrido, rutas, km_por_km2
+  FROM resultados.q4
+ ORDER BY km_recorrido DESC;
+       comuna        | area_km2 | km_recorrido | rutas | km_por_km2 
+---------------------+----------+--------------+-------+------------
+ Santiago            |    23.18 |       1149.9 |   156 |       49.6
+ Las Condes          |    30.92 |        616.2 |    73 |       19.9
+ Estación Central    |    14.37 |        534.3 |    81 |       37.2
+ Peñalolén           |    30.86 |        459.7 |    68 |       14.9
+ Ñuñoa               |    16.89 |        417.5 |    60 |       24.7
+ Providencia         |    14.44 |        399.1 |    81 |       27.6
+ Renca               |    16.73 |        337.4 |    33 |       20.2
+ Quilicura           |    16.65 |        326.4 |    46 |       19.6
+ Vitacura            |    26.35 |        311.3 |    40 |       11.8
+ Maipú               |    11.18 |        305.4 |    61 |       27.3
+ Cerrillos           |    15.22 |        296.8 |    53 |       19.5
+ Conchalí            |    10.94 |        269.7 |    49 |       24.7
+ La Reina            |    17.12 |        266.9 |    36 |       15.6
+ Quinta Normal       |    11.80 |        266.2 |    46 |       22.6
+ Huechuraba          |    21.01 |        261.9 |    48 |       12.5
+ Recoleta            |    15.61 |        258.6 |    68 |       16.6
+ San Miguel          |     9.63 |        244.0 |    49 |       25.3
+ Macul               |    12.81 |        241.5 |    53 |       18.9
+ Lo Prado            |     6.54 |        221.1 |    70 |       33.8
+ Pedro Aguirre Cerda |     8.73 |        204.7 |    39 |       23.4
+ La Florida          |     9.08 |        204.3 |    59 |       22.5
+ San Joaquín         |     9.94 |        199.0 |    40 |       20.0
+ Independencia       |     7.35 |        191.8 |    42 |       26.1
+ Cerro Navia         |     7.13 |        155.8 |    33 |       21.8
+ Pudahuel            |     5.14 |        126.4 |    63 |       24.6
+ Lo Espejo           |     4.04 |        110.8 |    36 |       27.4
+ La Cisterna         |     1.72 |         41.5 |    28 |       24.1
+ La Granja           |     1.08 |         15.1 |    20 |       13.9
+ Lo Barnechea        |     2.81 |          7.7 |    10 |        2.7
+ San Ramón           |     0.16 |          3.6 |    14 |       22.0
+(30 rows)
+
+DROP TABLE IF EXISTS resultados.q4_tiempos;
+DROP TABLE
+CREATE TABLE resultados.q4_tiempos (version text, corrida int, ms numeric, km_total numeric);
+CREATE TABLE
+DO $$
+DECLARE t0 timestamptz; k numeric; i int;
+BEGIN
+  FOR i IN 1..3 LOOP
+    t0 := clock_timestamp();
+    SELECT sum(ST_Length(ST_Intersection(r.geom, c.geom))) / 1000 INTO k
+      FROM recorridos r JOIN comunas_zona c ON ST_Intersects(r.geom, c.geom)
+     WHERE r.es_principal;
+    INSERT INTO resultados.q4_tiempos VALUES
+      ('A: comunas completas', i, round(extract(epoch FROM clock_timestamp() - t0)::numeric * 1000, 1), round(k, 2));
+
+    t0 := clock_timestamp();
+    SELECT sum(ST_Length(ST_Intersection(r.geom, s.geom))) / 1000 INTO k
+      FROM recorridos r JOIN comunas_zona_sub s ON ST_Intersects(r.geom, s.geom)
+     WHERE r.es_principal;
+    INSERT INTO resultados.q4_tiempos VALUES
+      ('B: ST_Subdivide(geom, 128)', i, round(extract(epoch FROM clock_timestamp() - t0)::numeric * 1000, 1), round(k, 2));
+  END LOOP;
+END $$;
+DO
+
+--- Tiempo con y sin ST_Subdivide (mejor de 3 corridas) ---
+SELECT version, min(ms) AS mejor_ms, max(km_total) AS km_total,
+       (SELECT count(*) FROM comunas_zona)     AS poligonos_comunas,
+       (SELECT count(*) FROM comunas_zona_sub) AS piezas_subdivididas
+  FROM resultados.q4_tiempos
+ GROUP BY version
+ ORDER BY version;
+          version           | mejor_ms | km_total | poligonos_comunas | piezas_subdivididas 
+----------------------------+----------+----------+-------------------+---------------------
+ A: comunas completas       |    438.6 |  8444.28 |                30 |                  67
+ B: ST_Subdivide(geom, 128) |    558.2 |  8444.28 |                30 |                  67
+(2 rows)
+

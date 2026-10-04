@@ -1,0 +1,113 @@
+=== P3. Anti-join en los dos sentidos (radio 50 m) ===
+DROP TABLE IF EXISTS resultados.q3_gtfs_sin_osm;
+DROP TABLE
+DROP TABLE IF EXISTS resultados.q3_osm_sin_gtfs;
+DROP TABLE
+DROP TABLE IF EXISTS resultados.q3;
+DROP TABLE
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE TABLE resultados.q3_gtfs_sin_osm AS
+SELECT g.stop_id, g.nombre, g.geom
+  FROM paraderos_gtfs g
+ WHERE g.modo = 'bus'
+   AND NOT EXISTS (SELECT 1 FROM paraderos_osm o WHERE ST_DWithin(o.geom, g.geom, 50));
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Nested Loop Anti Join (actual time=0.171..70.941 rows=380 loops=1)
+   Buffers: shared hit=20051
+   ->  Seq Scan on paraderos_gtfs g (actual time=0.011..1.221 rows=6569 loops=1)
+         Filter: (modo = 'bus'::text)
+         Rows Removed by Filter: 243
+         Buffers: shared hit=104
+   ->  Index Scan using paraderos_osm_geom_gist on paraderos_osm o (actual time=0.010..0.010 rows=1 loops=6569)
+         Index Cond: (geom && st_expand(g.geom, '50'::double precision))
+         Filter: st_dwithin(geom, g.geom, '50'::double precision)
+         Rows Removed by Filter: 0
+         Buffers: shared hit=19947
+ Planning:
+   Buffers: shared hit=273 dirtied=2
+ Planning Time: 15.611 ms
+ Execution Time: 72.615 ms
+(15 rows)
+
+CREATE TABLE resultados.q3_osm_sin_gtfs AS
+SELECT o.id, o.osm_id, o.nombre, o.geom
+  FROM paraderos_osm o
+ WHERE NOT EXISTS (SELECT 1 FROM paraderos_gtfs g
+                    WHERE g.modo = 'bus' AND ST_DWithin(g.geom, o.geom, 50));
+SELECT 364
+CREATE TABLE resultados.q3 AS
+SELECT 'GTFS (bus) sin bus_stop OSM a < 50 m'::text AS sentido,
+       (SELECT count(*) FROM paraderos_gtfs WHERE modo = 'bus') AS total,
+       (SELECT count(*) FROM resultados.q3_gtfs_sin_osm)       AS sin_pareja
+UNION ALL
+SELECT 'bus_stop OSM sin paradero GTFS a < 50 m',
+       (SELECT count(*) FROM paraderos_osm),
+       (SELECT count(*) FROM resultados.q3_osm_sin_gtfs);
+SELECT 2
+
+--- Resultado ---
+SELECT sentido, total, sin_pareja, round(100.0 * sin_pareja / nullif(total, 0), 1) AS pct_sin_pareja
+  FROM resultados.q3;
+                 sentido                 | total | sin_pareja | pct_sin_pareja 
+-----------------------------------------+-------+------------+----------------
+ GTFS (bus) sin bus_stop OSM a < 50 m    |  6569 |        380 |            5.8
+ bus_stop OSM sin paradero GTFS a < 50 m |  6568 |        364 |            5.5
+(2 rows)
+
+
+--- Por comuna (dónde se concentran los faltantes) ---
+SELECT c.nombre AS comuna,
+       (SELECT count(*) FROM resultados.q3_gtfs_sin_osm x WHERE ST_Intersects(c.geom, x.geom)) AS gtfs_sin_osm,
+       (SELECT count(*) FROM resultados.q3_osm_sin_gtfs x WHERE ST_Intersects(c.geom, x.geom)) AS osm_sin_gtfs
+  FROM comunas_zona c
+ ORDER BY 2 DESC, 1;
+       comuna        | gtfs_sin_osm | osm_sin_gtfs 
+---------------------+--------------+--------------
+ Peñalolén           |           45 |           27
+ Quinta Normal       |           25 |           24
+ Santiago            |           24 |           27
+ Huechuraba          |           22 |           14
+ Las Condes          |           22 |           19
+ Conchalí            |           20 |           19
+ La Reina            |           18 |           30
+ Ñuñoa               |           18 |           20
+ Quilicura           |           18 |           11
+ Estación Central    |           17 |           16
+ Renca               |           16 |           21
+ La Florida          |           13 |            9
+ Recoleta            |           13 |           10
+ Vitacura            |           13 |            6
+ Independencia       |           11 |           14
+ San Joaquín         |           11 |           14
+ Cerro Navia         |           10 |           15
+ Providencia         |           10 |            6
+ Lo Prado            |            9 |           11
+ Pedro Aguirre Cerda |            9 |            3
+ Cerrillos           |            8 |            9
+ Maipú               |            8 |           11
+ San Miguel          |            8 |           10
+ Macul               |            7 |           10
+ Lo Espejo           |            2 |            2
+ Pudahuel            |            2 |            6
+ La Granja           |            1 |            0
+ La Cisterna         |            0 |            0
+ Lo Barnechea        |            0 |            0
+ San Ramón           |            0 |            0
+(30 rows)
+
+
+--- Sensibilidad al radio: con 25, 50 y 100 m ---
+SELECT r AS radio_m,
+       (SELECT count(*) FROM paraderos_gtfs g WHERE g.modo = 'bus'
+           AND NOT EXISTS (SELECT 1 FROM paraderos_osm o WHERE ST_DWithin(o.geom, g.geom, r))) AS gtfs_sin_osm,
+       (SELECT count(*) FROM paraderos_osm o
+           WHERE NOT EXISTS (SELECT 1 FROM paraderos_gtfs g WHERE g.modo = 'bus' AND ST_DWithin(g.geom, o.geom, r))) AS osm_sin_gtfs
+  FROM unnest(ARRAY[25, 50, 100]) AS r;
+ radio_m | gtfs_sin_osm | osm_sin_gtfs 
+---------+--------------+--------------
+      25 |         1003 |          995
+      50 |          380 |          364
+     100 |          141 |          137
+(3 rows)
+

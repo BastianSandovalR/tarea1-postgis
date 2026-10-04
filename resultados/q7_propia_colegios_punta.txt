@@ -1,0 +1,199 @@
+=== P7. Oferta de buses en punta AM alrededor de establecimientos educacionales ===
+DROP TABLE IF EXISTS resultados.q7;
+DROP TABLE
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE TABLE resultados.q7 AS
+WITH esc AS (
+  SELECT a.id, a.amenity, a.nombre, a.origen, a.geom
+    FROM amenidades a
+   WHERE a.amenity IN ('school', 'college', 'university')
+),
+cerca AS (                 -- por establecimiento, ruta y sentido: el paradero cercano con más pasadas
+  SELECT e.id, spr.route_id, spr.direction_id, max(spr.pasadas_punta_am) AS pasadas
+    FROM esc e
+    JOIN paraderos_gtfs p          ON p.modo = 'bus' AND ST_DWithin(p.geom, e.geom, 400)
+    JOIN servicio_paradero_ruta spr ON spr.stop_id = p.stop_id
+   GROUP BY e.id, spr.route_id, spr.direction_id
+),
+oferta AS (
+  SELECT id, sum(pasadas) AS pasadas_2h, count(DISTINCT route_id) AS rutas
+    FROM cerca GROUP BY id
+)
+SELECT e.id, e.amenity, e.nombre, e.origen,
+       coalesce(o.rutas, 0)                          AS rutas_400m,
+       round(coalesce(o.pasadas_2h, 0) / 2.0, 1)     AS buses_hora_punta,
+       round(pc.dist::numeric)                       AS paradero_mas_cercano_m,
+       cz.nombre                                     AS comuna,
+       e.geom
+  FROM esc e
+  LEFT JOIN oferta o ON o.id = e.id
+  CROSS JOIN LATERAL (SELECT p.geom <-> e.geom AS dist FROM paraderos_gtfs p
+                       WHERE p.modo = 'bus' ORDER BY p.geom <-> e.geom LIMIT 1) pc
+  LEFT JOIN LATERAL (SELECT s.nombre FROM comunas_zona_sub s
+                      WHERE ST_Intersects(s.geom, e.geom) LIMIT 1) cz ON true;
+                                                                            QUERY PLAN                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Left Join (actual time=130.937..273.424 rows=1851 loops=1)
+   Buffers: shared hit=37983
+   CTE esc
+     ->  Bitmap Heap Scan on amenidades a (actual time=0.084..0.587 rows=1851 loops=1)
+           Recheck Cond: ((amenity)::text = ANY ('{school,college,university}'::text[]))
+           Heap Blocks: exact=176
+           Buffers: shared hit=183
+           ->  Bitmap Index Scan on amenidades_amenity_idx (actual time=0.060..0.061 rows=1851 loops=1)
+                 Index Cond: ((amenity)::text = ANY ('{school,college,university}'::text[]))
+                 Buffers: shared hit=7
+   ->  Nested Loop (actual time=130.887..248.391 rows=1851 loops=1)
+         Buffers: shared hit=33946
+         ->  Hash Right Join (actual time=130.815..168.717 rows=1851 loops=1)
+               Hash Cond: (e_1.id = e.id)
+               Buffers: shared hit=26688
+               ->  GroupAggregate (actual time=129.380..166.166 rows=1830 loops=1)
+                     Group Key: e_1.id
+                     Buffers: shared hit=26505
+                     ->  GroupAggregate (actual time=129.370..160.035 rows=37573 loops=1)
+                           Group Key: e_1.id, spr.route_id, spr.direction_id
+                           Buffers: shared hit=26505
+                           ->  Sort (actual time=129.361..138.927 rows=81534 loops=1)
+                                 Sort Key: e_1.id, spr.route_id, spr.direction_id
+                                 Sort Method: quicksort  Memory: 6257kB
+                                 Buffers: shared hit=26505
+                                 ->  Hash Join (actual time=55.110..74.348 rows=81534 loops=1)
+                                       Hash Cond: (spr.stop_id = p.stop_id)
+                                       Buffers: shared hit=26499
+                                       ->  Seq Scan on servicio_paradero_ruta spr (actual time=0.007..2.256 rows=40686 loops=1)
+                                             Buffers: shared hit=300
+                                       ->  Hash (actual time=55.041..55.042 rows=21190 loops=1)
+                                             Buckets: 32768 (originally 16384)  Batches: 1 (originally 1)  Memory Usage: 1211kB
+                                             Buffers: shared hit=26199
+                                             ->  Nested Loop (actual time=0.193..50.562 rows=21190 loops=1)
+                                                   Buffers: shared hit=26199
+                                                   ->  CTE Scan on esc e_1 (actual time=0.001..0.238 rows=1851 loops=1)
+                                                   ->  Index Scan using paraderos_gtfs_geom_gist on paraderos_gtfs p (actual time=0.013..0.025 rows=11 loops=1851)
+                                                         Index Cond: (geom && st_expand(e_1.geom, '400'::double precision))
+                                                         Filter: ((modo = 'bus'::text) AND st_dwithin(geom, e_1.geom, '400'::double precision))
+                                                         Rows Removed by Filter: 4
+                                                         Buffers: shared hit=26199
+               ->  Hash (actual time=1.426..1.427 rows=1851 loops=1)
+                     Buckets: 2048  Batches: 1  Memory Usage: 226kB
+                     Buffers: shared hit=183
+                     ->  CTE Scan on esc e (actual time=0.085..1.204 rows=1851 loops=1)
+                           Buffers: shared hit=183
+         ->  Limit (actual time=0.043..0.043 rows=1 loops=1851)
+               Buffers: shared hit=7258
+               ->  Index Scan using paraderos_gtfs_geom_gist on paraderos_gtfs p_1 (actual time=0.041..0.041 rows=1 loops=1851)
+                     Order By: (geom <-> e.geom)
+                     Filter: (modo = 'bus'::text)
+                     Rows Removed by Filter: 0
+                     Buffers: shared hit=7258
+   ->  Limit (actual time=0.011..0.011 rows=1 loops=1851)
+         Buffers: shared hit=4037
+         ->  Index Scan using comunas_zona_sub_geom_gist on comunas_zona_sub s (actual time=0.010..0.010 rows=1 loops=1851)
+               Index Cond: (geom && e.geom)
+               Filter: st_intersects(geom, e.geom)
+               Rows Removed by Filter: 0
+               Buffers: shared hit=4037
+ Planning:
+   Buffers: shared hit=524 dirtied=1
+ Planning Time: 13.199 ms
+ Execution Time: 278.559 ms
+(64 rows)
+
+ALTER TABLE resultados.q7 ADD COLUMN categoria text;
+ALTER TABLE
+UPDATE resultados.q7 SET categoria = CASE
+    WHEN buses_hora_punta = 0   THEN '1. sin buses a 400 m'
+    WHEN buses_hora_punta < 30  THEN '2. menos de 30 buses/h'
+    WHEN buses_hora_punta < 100 THEN '3. 30 a 100 buses/h'
+    ELSE                             '4. 100 o más buses/h' END;
+UPDATE 1851
+
+--- Distribución ---
+SELECT categoria, count(*) AS establecimientos,
+       round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct
+  FROM resultados.q7 GROUP BY categoria ORDER BY categoria;
+       categoria        | establecimientos | pct  
+------------------------+------------------+------
+ 1. sin buses a 400 m   |               21 |  1.1
+ 2. menos de 30 buses/h |              141 |  7.6
+ 3. 30 a 100 buses/h    |              860 | 46.5
+ 4. 100 o más buses/h   |              829 | 44.8
+(4 rows)
+
+SELECT percentile_cont(ARRAY[0.1, 0.25, 0.5, 0.75, 0.9]) WITHIN GROUP (ORDER BY buses_hora_punta) AS percentiles_10_25_50_75_90
+  FROM resultados.q7;
+ percentiles_10_25_50_75_90 
+----------------------------
+ {32,55.5,91,143,225.5}
+(1 row)
+
+
+--- Por comuna ---
+SELECT comuna, count(*) AS establecimientos,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY buses_hora_punta) AS mediana_buses_hora,
+       count(*) FILTER (WHERE buses_hora_punta < 30) AS con_menos_de_30_buses_h,
+       round(100.0 * count(*) FILTER (WHERE buses_hora_punta < 30) / count(*), 1) AS pct_menos_de_30
+  FROM resultados.q7
+ WHERE comuna IS NOT NULL
+ GROUP BY comuna
+ ORDER BY mediana_buses_hora, comuna;
+       comuna        | establecimientos | mediana_buses_hora | con_menos_de_30_buses_h | pct_menos_de_30 
+---------------------+------------------+--------------------+-------------------------+-----------------
+ Lo Barnechea        |                2 |                  0 |                       2 |           100.0
+ Huechuraba          |               22 |              51.25 |                       6 |            27.3
+ Recoleta            |               88 |               51.5 |                      26 |            29.5
+ Vitacura            |               30 |                 52 |                       6 |            20.0
+ San Ramón           |                4 |                 55 |                       0 |             0.0
+ La Granja           |                4 |              65.25 |                       0 |             0.0
+ Las Condes          |               86 |              65.25 |                      21 |            24.4
+ Pudahuel            |               16 |               65.5 |                       2 |            12.5
+ La Reina            |               55 |                 66 |                       6 |            10.9
+ Pedro Aguirre Cerda |               47 |                 68 |                       2 |             4.3
+ Macul               |               50 |                 70 |                       5 |            10.0
+ Conchalí            |               67 |               72.5 |                       0 |             0.0
+ La Cisterna         |               11 |               72.5 |                       0 |             0.0
+ Cerrillos           |               45 |                 73 |                       2 |             4.4
+ Cerro Navia         |               55 |               78.5 |                       0 |             0.0
+ San Joaquín         |               54 |               79.5 |                       3 |             5.6
+ Independencia       |               56 |               82.5 |                       4 |             7.1
+ La Florida          |               41 |               85.5 |                       2 |             4.9
+ Maipú               |               38 |                 86 |                       2 |             5.3
+ Peñalolén           |              101 |                 89 |                      15 |            14.9
+ Renca               |               66 |               91.5 |                       4 |             6.1
+ Quinta Normal       |               78 |              93.25 |                       4 |             5.1
+ Providencia         |              119 |               95.5 |                       8 |             6.7
+ Lo Espejo           |               27 |                108 |                       1 |             3.7
+ Ñuñoa               |              126 |             110.25 |                      12 |             9.5
+ Lo Prado            |               43 |                119 |                       1 |             2.3
+ Estación Central    |               74 |             123.25 |                       4 |             5.4
+ San Miguel          |               91 |              127.5 |                      16 |            17.6
+ Quilicura           |               43 |              135.5 |                       4 |             9.3
+ Santiago            |              312 |              165.5 |                       4 |             1.3
+(30 rows)
+
+
+--- Los 15 establecimientos peor servidos (con nombre) ---
+SELECT left(nombre, 45) AS establecimiento, amenity, comuna, rutas_400m, buses_hora_punta, paradero_mas_cercano_m
+  FROM resultados.q7
+ WHERE nombre IS NOT NULL
+ ORDER BY buses_hora_punta, paradero_mas_cercano_m DESC
+ LIMIT 15;
+                establecimiento                |  amenity   |    comuna    | rutas_400m | buses_hora_punta | paradero_mas_cercano_m 
+-----------------------------------------------+------------+--------------+------------+------------------+------------------------
+ Colegio The Newland School                    | school     | Lo Barnechea |          0 |              0.0 |                   1070
+ Colegio The Newland School                    | school     | Lo Barnechea |          0 |              0.0 |                    912
+ Colegio San Benito                            | school     | Vitacura     |          0 |              0.0 |                    901
+ Colegio Manquecura                            | school     | Quilicura    |          0 |              0.0 |                    871
+ Escuela Especial N° 2429 Peumayen             | school     | La Florida   |          0 |              0.0 |                    522
+ Colegio Andino Antillanca                     | school     | Las Condes   |          0 |              0.0 |                    513
+ Colegio La Abadía                             | school     | La Reina     |          0 |              0.0 |                    512
+ Colegio Emus                                  | school     | Las Condes   |          0 |              0.0 |                    503
+ Colegio Leonardo Da Vinci                     | school     | Las Condes   |          0 |              0.0 |                    477
+ Colegio Tecnico Hoteleria y Gastronomia Achig | school     | Las Condes   |          0 |              0.0 |                    467
+ Instituto Presidente Errázuriz                | school     | Las Condes   |          0 |              0.0 |                    453
+ Saint Paul Montessori School                  | school     | Las Condes   |          0 |              0.0 |                    450
+ Pontificia Universidad Católica de Chile (Cam | university | Macul        |          0 |              0.0 |                    449
+ Colegio International San Estanislao Kostka C | school     | Las Condes   |          0 |              0.0 |                    429
+ Colegio Pumahue                               | school     | Peñalolén    |          0 |              0.0 |                    429
+(15 rows)
+

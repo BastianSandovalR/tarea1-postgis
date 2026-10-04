@@ -1,0 +1,49 @@
+=== Uso de índices durante P1-P7 (pg_stat_user_indexes) ===
+SELECT s.schemaname || '.' || s.relname          AS tabla,
+       s.indexrelname                              AS indice,
+       am.amname                                   AS tipo,
+       s.idx_scan                                  AS veces_usado,
+       s.idx_tup_read                              AS tuplas_leidas,
+       pg_size_pretty(pg_relation_size(s.indexrelid)) AS tamano,
+       CASE WHEN s.idx_scan = 0 THEN '<- NO SE USÓ' ELSE '' END AS nota
+  FROM pg_stat_user_indexes s
+  JOIN pg_class c ON c.oid = s.indexrelid
+  JOIN pg_am am   ON am.oid = c.relam
+ WHERE (s.schemaname IN ('public', 'resultados')
+        AND s.relname NOT IN ('etl_log', 'metadatos_fuentes', 'spatial_ref_sys', 'parametros')
+        AND s.relname NOT ILIKE 'comunas_cl%')          -- tabla fuente del Lab 03, no es nuestra
+    OR (s.schemaname = 'crudo' AND s.relname = 'gtfs_stop_times')
+ ORDER BY s.idx_scan = 0 DESC, s.relname, s.indexrelname;
+             tabla             |           indice            | tipo  | veces_usado | tuplas_leidas |   tamano   |     nota     
+-------------------------------+-----------------------------+-------+-------------+---------------+------------+--------------
+ public.amenidades             | amenidades_pkey             | btree |           0 |             0 | 472 kB     | <- NO SE USÓ
+ public.calles                 | calles_geom_gist            | gist  |           0 |             0 | 4160 kB    | <- NO SE USÓ
+ public.calles                 | calles_pkey                 | btree |           0 |             0 | 2232 kB    | <- NO SE USÓ
+ public.comunas_zona_sub       | comunas_zona_sub_pkey       | btree |           0 |             0 | 16 kB      | <- NO SE USÓ
+ public.edificios              | edificios_geom_gist         | gist  |           0 |             0 | 4880 kB    | <- NO SE USÓ
+ public.edificios              | edificios_pkey              | btree |           0 |             0 | 2632 kB    | <- NO SE USÓ
+ resultados.grilla_hex         | grilla_hex_gist             | gist  |           0 |             0 | 40 kB      | <- NO SE USÓ
+ resultados.grilla_hex         | grilla_hex_ij               | btree |           0 |             0 | 32 kB      | <- NO SE USÓ
+ public.gtfs_viajes            | gtfs_viajes_pkey            | btree |           0 |             0 | 936 kB     | <- NO SE USÓ
+ public.recorridos             | recorridos_route_idx        | btree |           0 |             0 | 32 kB      | <- NO SE USÓ
+ public.servicio_paradero      | servicio_paradero_pkey      | btree |           0 |             0 | 296 kB     | <- NO SE USÓ
+ public.amenidades             | amenidades_amenity_idx      | btree |           3 |          1851 | 168 kB     | 
+ public.amenidades             | amenidades_geom_gist        | gist  |         117 |          2119 | 848 kB     | 
+ public.comunas_zona           | comunas_zona_geom_gist      | gist  |           1 |            30 | 8192 bytes | 
+ public.comunas_zona           | comunas_zona_pkey           | btree |           4 |            62 | 16 kB      | 
+ public.comunas_zona_sub       | comunas_zona_sub_geom_gist  | gist  |      120673 |        142633 | 8192 bytes | 
+ public.edificios              | edificios_punto_gist        | gist  |         636 |        159056 | 4800 kB    | 
+ public.gtfs_rutas             | gtfs_rutas_pkey             | btree |           2 |             2 | 32 kB      | 
+ crudo.gtfs_stop_times         | stop_times_trip_idx         | btree |           2 |           183 | 8216 kB    | 
+ public.gtfs_viajes            | gtfs_viajes_route_idx       | btree |           3 |            60 | 208 kB     | 
+ public.gtfs_viajes            | gtfs_viajes_shape_idx       | btree |           2 |             2 | 216 kB     | 
+ public.paraderos_gtfs         | paraderos_gtfs_geom_gist    | gist  |      148862 |        274693 | 272 kB     | 
+ public.paraderos_gtfs         | paraderos_gtfs_modo_idx     | btree |           1 |          6569 | 64 kB      | 
+ public.paraderos_gtfs         | paraderos_gtfs_pkey         | btree |         187 |           121 | 168 kB     | 
+ public.paraderos_osm          | paraderos_osm_geom_gist     | gist  |      145097 |        227519 | 264 kB     | 
+ public.paraderos_osm          | paraderos_osm_pkey          | btree |           1 |          6568 | 160 kB     | 
+ public.recorridos             | recorridos_geom_gist        | gist  |        1024 |        152596 | 40 kB      | 
+ public.recorridos             | recorridos_pkey             | btree |          60 |            60 | 56 kB      | 
+ public.servicio_paradero_ruta | servicio_paradero_ruta_pkey | btree |           2 |             2 | 1272 kB    | 
+(29 rows)
+

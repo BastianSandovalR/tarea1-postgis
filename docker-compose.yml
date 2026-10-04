@@ -1,0 +1,71 @@
+# Tarea 1 — PostGIS de punta a punta (Santiago centro)
+#
+#   docker compose up -d        -> construye la imagen (si no existe) y levanta PostGIS
+#   ./cargar.sh                 -> ETL completo (OSM + GTFS + DPA), índices y ANALYZE
+#   ./consultas.sh              -> 7 preguntas, planes, mapas y GeoPackage de salida
+#
+# Nota Fedora/SELinux: los montajes llevan ":z" para que el contenedor pueda leerlos.
+# En sistemas sin SELinux la opción se ignora.
+
+name: tarea1-postgis
+
+services:
+  db:
+    build: ./docker
+    image: tarea1-postgis:latest
+    environment:
+      POSTGRES_DB: tarea1
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGUSER: postgres
+      PGDATABASE: tarea1
+      PGOPTIONS: "-c client_min_messages=warning"   # sin NOTICEs de DROP IF EXISTS en el log
+    # Puerto 5433 en el host para no chocar con el PostGIS del Lab 05 (5432).
+    ports:
+      - "${PG_PORT:-5433}:5432"
+    # Parámetros moderados: caben en un notebook de 8 GB y aceleran la carga.
+    command: >
+      postgres
+        -c shared_buffers=512MB
+        -c work_mem=64MB
+        -c maintenance_work_mem=512MB
+        -c max_wal_size=4GB
+        -c random_page_cost=1.1
+        -c track_io_timing=on
+        -c jit=off
+    shm_size: 1g
+    volumes:
+      - pgdata:/var/lib/postgresql/data          # volumen con nombre: la base sobrevive a "down"
+      - ./datos:/datos:ro,z                       # archivos fuente (no versionados)
+      - ./sql:/sql:ro,z                           # ETL en SQL
+      - ./scripts:/scripts:ro,z                   # scripts que corren dentro del contenedor
+      - ./consultas:/consultas:ro,z               # preguntas de la Parte C
+      - ./salidas:/salidas:z                      # GeoPackage exportado
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tarea1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Mapas del informe (geopandas + matplotlib). No se levanta con "up -d":
+  # lo invoca consultas.sh con "docker compose run --rm mapas".
+  mapas:
+    build: ./mapas
+    image: tarea1-mapas:latest
+    profiles: ["mapas"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: tarea1
+      MPLCONFIGDIR: /tmp/mpl
+    volumes:
+      - ./mapas:/app:ro,z
+      - ./salidas:/salidas:z
+
+volumes:
+  pgdata:

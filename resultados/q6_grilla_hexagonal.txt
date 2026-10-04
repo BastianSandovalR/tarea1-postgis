@@ -1,0 +1,123 @@
+=== P6. Grilla hexagonal 500 m: edificios vs recorridos ===
+DROP MATERIALIZED VIEW IF EXISTS resultados.grilla_hex CASCADE;
+DROP MATERIALIZED VIEW
+EXPLAIN (ANALYZE, BUFFERS, COSTS OFF)
+CREATE MATERIALIZED VIEW resultados.grilla_hex AS
+WITH c AS MATERIALIZED (SELECT caja() AS g),   -- la caja se calcula una vez, no por celda
+hex AS (
+  SELECT h.i, h.j, h.geom
+    FROM c, ST_HexagonGrid(500, c.g) AS h
+   WHERE ST_Intersects(h.geom, c.g)
+)
+SELECT hex.i, hex.j,
+       e.edificios,
+       r.recorridos,
+       r.recorridos_bus,
+       round(e.edificios::numeric / (r.recorridos + 1), 1) AS indice,
+       hex.geom::geometry(Polygon, 5361) AS geom
+  FROM hex
+  CROSS JOIN LATERAL (SELECT count(*) AS edificios
+                        FROM edificios ed
+                       WHERE ST_Intersects(ed.punto, hex.geom)) e
+  CROSS JOIN LATERAL (SELECT count(DISTINCT rc.route_id) AS recorridos,
+                             count(DISTINCT rc.route_id) FILTER (WHERE rc.modo = 'bus') AS recorridos_bus
+                        FROM recorridos rc
+                       WHERE ST_Intersects(rc.geom, hex.geom)) r;
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual time=80.802..1332.952 rows=636 loops=1)
+   Buffers: shared hit=399081 read=527 dirtied=2
+   I/O Timings: shared read=3.520
+   CTE c
+     ->  Result (actual time=78.660..78.662 rows=1 loops=1)
+           Buffers: shared hit=346 dirtied=2
+   ->  Nested Loop (actual time=79.191..236.495 rows=636 loops=1)
+         Buffers: shared hit=105221 read=527 dirtied=2
+         I/O Timings: shared read=3.520
+         ->  Nested Loop (actual time=79.050..83.040 rows=636 loops=1)
+               Buffers: shared hit=346 dirtied=2
+               ->  CTE Scan on c (actual time=78.665..78.667 rows=1 loops=1)
+                     Buffers: shared hit=346 dirtied=2
+               ->  Function Scan on st_hexagongrid h (actual time=0.382..4.091 rows=636 loops=1)
+                     Filter: st_intersects(geom, c.g)
+                     Rows Removed by Filter: 46
+         ->  Aggregate (actual time=0.240..0.240 rows=1 loops=636)
+               Buffers: shared hit=104875 read=527
+               I/O Timings: shared read=3.520
+               ->  Index Scan using edificios_punto_gist on edificios ed (actual time=0.031..0.229 rows=187 loops=636)
+                     Index Cond: (punto && h.geom)
+                     Filter: st_intersects(punto, h.geom)
+                     Rows Removed by Filter: 63
+                     Buffers: shared hit=104875 read=527
+                     I/O Timings: shared read=3.520
+   ->  Aggregate (actual time=1.721..1.721 rows=1 loops=636)
+         Buffers: shared hit=293860
+         ->  Sort (actual time=1.712..1.713 rows=23 loops=636)
+               Sort Key: rc.route_id
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=293860
+               ->  Index Scan using recorridos_geom_gist on recorridos rc (actual time=0.382..1.695 rows=23 loops=636)
+                     Index Cond: (geom && h.geom)
+                     Filter: st_intersects(geom, h.geom)
+                     Rows Removed by Filter: 100
+                     Buffers: shared hit=293857
+ Planning:
+   Buffers: shared hit=371 dirtied=1
+ Planning Time: 1.163 ms
+ Execution Time: 1338.305 ms
+(40 rows)
+
+CREATE UNIQUE INDEX grilla_hex_ij   ON resultados.grilla_hex (i, j);
+CREATE INDEX
+CREATE INDEX        grilla_hex_gist ON resultados.grilla_hex USING gist (geom);
+CREATE INDEX
+ANALYZE resultados.grilla_hex;
+ANALYZE
+
+--- Resumen de la grilla ---
+SELECT count(*)                                        AS celdas,
+       count(*) FILTER (WHERE edificios > 0)           AS celdas_con_edificios,
+       count(*) FILTER (WHERE recorridos = 0)          AS celdas_sin_recorridos,
+       count(*) FILTER (WHERE edificios >= 50 AND recorridos = 0) AS celdas_50mas_edificios_sin_recorridos,
+       round(avg(edificios), 1)                        AS edificios_promedio,
+       round(avg(recorridos), 1)                       AS recorridos_promedio,
+       round(corr(edificios, recorridos)::numeric, 3)  AS correlacion_edificios_recorridos
+  FROM resultados.grilla_hex;
+ celdas | celdas_con_edificios | celdas_sin_recorridos | celdas_50mas_edificios_sin_recorridos | edificios_promedio | recorridos_promedio | correlacion_edificios_recorridos 
+--------+----------------------+-----------------------+---------------------------------------+--------------------+---------------------+----------------------------------
+    636 |                  604 |                    59 |                                     4 |              186.8 |                11.5 |                            0.187
+(1 row)
+
+DROP TABLE IF EXISTS resultados.q6_top10;
+DROP TABLE
+CREATE TABLE resultados.q6_top10 AS
+SELECT row_number() OVER (ORDER BY indice DESC, edificios DESC) AS rank,
+       g.i, g.j, g.edificios, g.recorridos, g.recorridos_bus, g.indice,
+       (SELECT c.nombre FROM comunas_zona c
+         ORDER BY ST_Area(ST_Intersection(c.geom, g.geom)) DESC LIMIT 1) AS comuna,
+       g.geom
+  FROM resultados.grilla_hex g
+ WHERE g.edificios >= 50
+ ORDER BY indice DESC, edificios DESC
+ LIMIT 10;
+SELECT 10
+
+--- Las 10 celdas con más edificios y menos recorridos ---
+SELECT rank, comuna, i, j, edificios, recorridos, recorridos_bus, indice,
+       round(ST_X(ST_Transform(ST_Centroid(geom), 4326))::numeric, 5) AS lon,
+       round(ST_Y(ST_Transform(ST_Centroid(geom), 4326))::numeric, 5) AS lat
+  FROM resultados.q6_top10 ORDER BY rank;
+ rank |   comuna    |  i  |  j   | edificios | recorridos | recorridos_bus | indice |    lon    |    lat    
+------+-------------+-----+------+-----------+------------+----------------+--------+-----------+-----------
+    1 | Las Condes  | 472 | 7275 |       755 |          0 |              0 |  755.0 | -70.57042 | -33.42643
+    2 | Ñuñoa       | 470 | 7273 |      1344 |          3 |              3 |  336.0 | -70.58684 | -33.44184
+    3 | Ñuñoa       | 471 | 7272 |      1321 |          3 |              3 |  330.3 | -70.57884 | -33.44585
+    4 | Maipú       | 450 | 7269 |      2532 |          7 |              7 |  316.5 | -70.74878 | -33.47090
+    5 | Santiago    | 464 | 7270 |      2450 |          7 |              7 |  306.3 | -70.63567 | -33.46464
+    6 | Providencia | 469 | 7273 |      1028 |          3 |              3 |  257.0 | -70.59483 | -33.43784
+    7 | Ñuñoa       | 470 | 7272 |       765 |          2 |              2 |  255.0 | -70.58698 | -33.44965
+    8 | Peñalolén   | 472 | 7267 |       702 |          2 |              2 |  234.0 | -70.57155 | -33.48890
+    9 | Providencia | 469 | 7274 |       456 |          1 |              1 |  228.0 | -70.59469 | -33.43003
+   10 | La Reina    | 473 | 7273 |       894 |          3 |              3 |  223.5 | -70.56257 | -33.43825
+(10 rows)
+
